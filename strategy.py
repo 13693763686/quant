@@ -4,10 +4,13 @@ import datetime as dt
 import matplotlib
 matplotlib.use("Agg")
 import backtrader as bt
+import matplotlib.dates as mdates
+import pandas as pd
 from clickhouse_driver import Client
 
 
 class PaginatedClickHouseOHLCV(bt.feed.DataBase):
+    lines = ("open", "high", "low", "close", "volume", "openinterest")
     params = dict(
         host="127.0.0.1",
         port=9000,
@@ -22,6 +25,9 @@ class PaginatedClickHouseOHLCV(bt.feed.DataBase):
         timeframe=bt.TimeFrame.Days,
         compression=1,
     )
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.addminperiod(1)
     def start(self):
         super().start()
         self._client = Client(
@@ -34,7 +40,7 @@ class PaginatedClickHouseOHLCV(bt.feed.DataBase):
         )
         self._buffer = []
         self._done = False
-        self._last = None
+        self._last_date = None
     def stop(self):
         try:
             if hasattr(self, "_client") and self._client is not None:
@@ -59,16 +65,28 @@ class PaginatedClickHouseOHLCV(bt.feed.DataBase):
             f"SELECT date, open, high, low, close, volume FROM {self.p.database}.{self.p.table} "
             f"WHERE code=%(code)s AND date {{op}} %(bound)s AND date <= %(end)s ORDER BY date LIMIT %(limit)s"
         )
-        if self._last is None:
+        def _to_date(v):
+            if isinstance(v, dt.datetime):
+                return v.date()
+            if isinstance(v, dt.date):
+                return v
+            if isinstance(v, str):
+                try:
+                    return dt.date.fromisoformat(v[:10])
+                except Exception:
+                    return dt.date.today()
+            return dt.date.today()
+        end_date = _to_date(self.p.todate)
+        if self._last_date is None:
             q = base.replace("{op}", ">=")
-            params = {"code": self.p.code, "bound": self.p.fromdate, "end": self.p.todate, "limit": self.p.chunk}
+            params = {"code": self.p.code, "bound": _to_date(self.p.fromdate), "end": end_date, "limit": self.p.chunk}
         else:
             q = base.replace("{op}", ">")
-            params = {"code": self.p.code, "bound": self._last, "end": self.p.todate, "limit": self.p.chunk}
+            params = {"code": self.p.code, "bound": _to_date(self._last_date), "end": end_date, "limit": self.p.chunk}
         rows = self._client.execute(q, params)
         if rows:
             self._buffer = rows
-            self._last = rows[-1][0]
+            self._last_date = rows[-1][0]
         else:
             self._done = True
     def _pop_next(self):
@@ -77,7 +95,7 @@ class PaginatedClickHouseOHLCV(bt.feed.DataBase):
             if not self._buffer:
                 return None
         return self._buffer.pop(0)
-    def load(self):
+    def _load(self):
         row = self._pop_next()
         if row is None:
             return False
@@ -108,10 +126,13 @@ class SmaCross(bt.Strategy):
                 self.sell(data=d)
 
 
-def run_backtest_pandas_duplicate_removed(args):
-    cerebro = bt.Cerebro()
+def run_backtest(args):
+    cerebro = bt.Cerebro(preload=False)
     codes = args.codes or [args.code]
+    print(codes)
     for code in codes:
+        start_dt = dt.datetime.fromisoformat(args.start)
+        end_dt = dt.datetime.fromisoformat(args.end)
         data = PaginatedClickHouseOHLCV(
             host=args.ck_host,
             port=args.ck_port,
@@ -120,8 +141,8 @@ def run_backtest_pandas_duplicate_removed(args):
             database=args.ck_database,
             table=args.ck_table,
             code=code,
-            fromdate=args.start,
-            todate=args.end,
+            fromdate=start_dt,
+            todate=end_dt,
             chunk=args.chunk,
         )
         cerebro.adddata(data, name=code)
@@ -131,19 +152,67 @@ def run_backtest_pandas_duplicate_removed(args):
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-    result = cerebro.run(maxcpus=1)
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+    cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
+    result = cerebro.run(maxcpus=1, runonce=False)
     strat = result[0]
     tr = strat.analyzers.timereturn.get_analysis()
     sr = strat.analyzers.sharpe.get_analysis()
     dd = strat.analyzers.drawdown.get_analysis()
+    ta = strat.analyzers.trades.get_analysis()
+    sqn = strat.analyzers.sqn.get_analysis()
     final_value = cerebro.broker.getvalue()
     start_value = args.cash
     pnl = final_value - start_value
-    print({"final_value": final_value, "pnl": pnl, "returns": tr, "sharpe": sr, "drawdown": dd})
     figs = cerebro.plot(style="candlestick")
-    fig = figs[0][0]
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    fig.savefig(args.output, dpi=150)
+    out_dir = os.path.dirname(args.output)
+    base = os.path.splitext(os.path.basename(args.output))[0]
+    os.makedirs(out_dir, exist_ok=True)
+    for i, figrow in enumerate(figs):
+        for j, fig in enumerate(figrow):
+            for ax in fig.axes:
+                ax.grid(True, alpha=0.12)
+                ax.xaxis.set_major_locator(mdates.YearLocator())
+                ax.xaxis.set_minor_locator(mdates.MonthLocator(bymonth=[3, 6, 9, 12]))
+                ax.tick_params(axis='x', labelrotation=0)
+            fig.set_size_inches(16, 6)
+            fig.savefig(os.path.join(out_dir, f"{base}_fig{i}_{j}.png"), dpi=150)
+    try:
+        import matplotlib.pyplot as plt
+        s = pd.Series(tr)
+        s.index = pd.to_datetime(s.index)
+        s.sort_index(inplace=True)
+        eq = (1.0 + s).cumprod() * start_value
+        plt.figure(figsize=(14, 4))
+        plt.plot(s.index, s.values)
+        plt.title("Time Returns")
+        plt.grid(alpha=0.2)
+        plt.savefig(os.path.join(out_dir, f"{base}_returns.png"), dpi=150)
+        plt.figure(figsize=(14, 4))
+        plt.plot(eq.index, eq.values)
+        plt.title("Equity Curve")
+        plt.grid(alpha=0.2)
+        plt.savefig(os.path.join(out_dir, f"{base}_equity.png"), dpi=150)
+        plt.figure(figsize=(6, 4))
+        plt.hist(s.values, bins=50, alpha=0.8)
+        plt.title("Return Distribution")
+        plt.grid(alpha=0.2)
+        plt.show()
+        plt.savefig(os.path.join(out_dir, f"{base}_ret_hist.png"), dpi=150)
+    except Exception:
+        print("exception in plot")
+        pass
+    try:
+        with open(os.path.join(out_dir, f"{base}_trades.txt"), "w") as f:
+            f.write(str(ta))
+        with open(os.path.join(out_dir, f"{base}_drawdown.txt"), "w") as f:
+            f.write(str(dd))
+        with open(os.path.join(out_dir, f"{base}_sharpe.txt"), "w") as f:
+            f.write(str(sr))
+        with open(os.path.join(out_dir, f"{base}_summary.txt"), "w") as f:
+            f.write(str({"final_value": final_value, "pnl": pnl, "sqn": sqn}))
+    except Exception:
+        pass
 
 
 def parse_args():
@@ -167,78 +236,7 @@ def parse_args():
     return p.parse_args()
 
 
-if __name__ == "__main__":
-    args = parse_args()
-    run_backtest(args)
-# /Users/xiaolongzhang/go/src/trae/quant/strategy.py
 
-
-
-
-def load_df_from_clickhouse_duplicate_removed(host, port, user, password, database, table, code, start, end):
-    client = Client(host=host, port=port, user=user, password=password, database=database, settings={"use_numpy": False})
-    rows = client.execute(
-        f"SELECT date, open, high, low, close, volume FROM {database}.{table} WHERE code=%(code)s AND date >= %(start)s AND date <= %(end)s ORDER BY date",
-        {"code": code, "start": start, "end": end},
-    )
-    df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
-    df["date"] = pd.to_datetime(df["date"])
-    df.set_index("date", inplace=True)
-    df.sort_index(inplace=True)
-    return df
-
-def run_backtest(args):
-    df = load_df_from_clickhouse(
-        host=args.ck_host,
-        port=args.ck_port,
-        user=args.ck_user,
-        password=args.ck_password,
-        database=args.ck_database,
-        table=args.ck_table,
-        code=args.code,
-        start=args.start,
-        end=args.end,
-    )
-    cerebro = bt.Cerebro()
-    data = bt.feeds.PandasData(dataname=df)
-    cerebro.adddata(data, name=args.code)
-    cerebro.addstrategy(SmaCross, fast=args.fast, slow=args.slow)
-    cerebro.broker.setcash(args.cash)
-    cerebro.broker.setcommission(commission=args.commission)
-    cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
-    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Days)
-    cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-    result = cerebro.run(maxcpus=1)
-    strat = result[0]
-    tr = strat.analyzers.timereturn.get_analysis()
-    sr = strat.analyzers.sharpe.get_analysis()
-    dd = strat.analyzers.drawdown.get_analysis()
-    final_value = cerebro.broker.getvalue()
-    start_value = args.cash
-    pnl = final_value - start_value
-    print({"final_value": final_value, "pnl": pnl, "returns": tr, "sharpe": sr, "drawdown": dd})
-    figs = cerebro.plot(style="candlestick")
-    fig = figs[0][0]
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    fig.savefig(args.output, dpi=150)
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Backtrader 双均线策略，数据源 ClickHouse")
-    p.add_argument("--ck-host", default="127.0.0.1")
-    p.add_argument("--ck-port", type=int, default=9000)
-    p.add_argument("--ck-user", default="default")
-    p.add_argument("--ck-password", default="")
-    p.add_argument("--ck-database", default="market")
-    p.add_argument("--ck-table", default="cn_stock_daily")
-    p.add_argument("--code", required=True)
-    p.add_argument("--start", default="2018-01-01")
-    p.add_argument("--end", default="2025-11-17")
-    p.add_argument("--fast", type=int, default=10)
-    p.add_argument("--slow", type=int, default=30)
-    p.add_argument("--cash", type=float, default=100000.0)
-    p.add_argument("--commission", type=float, default=0.001)
-    p.add_argument("--output", default="./output/backtest.png")
-    return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
