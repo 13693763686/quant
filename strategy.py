@@ -113,17 +113,29 @@ class PaginatedClickHouseOHLCV(bt.feed.DataBase):
 
 class SmaCross(bt.Strategy):
     params = dict(fast=10, slow=30)
+    # 【关键点1】定义一条新线来存储信号
+    lines = ('signal',)
+    
     def __init__(self):
         self.sma_fast = {d: bt.ind.SMA(d.close, period=self.p.fast) for d in self.datas}
         self.sma_slow = {d: bt.ind.SMA(d.close, period=self.p.slow) for d in self.datas}
         self.crossover = {d: bt.ind.CrossOver(self.sma_fast[d], self.sma_slow[d]) for d in self.datas}
     def next(self):
+        # 每一根K线开始，默认信号为0
+        self.lines.signal[0] = 0
+
         for d in self.datas:
             pos = self.getposition(d)
             if not pos.size and self.crossover[d] > 0:
                 self.buy(data=d)
+                # 【关键点2】如果是第一只股票(data0)，记录买入信号
+                if d == self.datas[0]:
+                    self.lines.signal[0] = 1
             elif pos.size and self.crossover[d] < 0:
                 self.sell(data=d)
+                # 【关键点3】如果是第一只股票(data0)，记录卖出信号
+                if d == self.datas[0]:
+                    self.lines.signal[0] = -1
 
 
 def run_backtest(args):
