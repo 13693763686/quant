@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<body>
+<!-- 父页面 -->
+<iframe id="adIframe" src="https://13693763686.github.io/quant/playble.html" style="position:fixed; top:0; left:0; width:100%; height:100%; border:none;"></iframe>
+
+<script>!function(){var r=document.createElement("div");r.style.cssText="position: fixed !important;top: 0 !important;left: 0 !important;right: 0 !important;z-index: 2147483647 !important;background-color: rgba(0, 255, 0, 0.9) !important;color: #000000 !important;font-size: 12px !important;line-height: 14px !important;padding: 5px !important;border-bottom: 2px solid red !important;max-height: 300px !important;overflow-y: auto !important;word-break: break-all !important;font-family: monospace !important;",r.innerHTML="<b>Console Ready (v2.0)</b>",(document.body||document.documentElement).appendChild(r),window.logToScreen=function(o){var n=new Date,e=n.getMinutes()+":"+n.getSeconds()+"."+n.getMilliseconds();r.innerHTML+='<br><span style="border-top:1px solid #999">['+e+"] "+o+"</span>",r.scrollTop=r.scrollHeight},window.onerror=function(o,n,e){return r.style.backgroundColor="rgba(255, 200, 0, 0.9)",window.logToScreen("❌ <b>JS ERROR:</b> "+o+" (Line "+e+")"),!1}}(),function(){var n=console.error,e=console.warn,r=console.log;console.error=function(){var o=Array.from(arguments).join(" ");window.logToScreen("<b style='color:red'>[Sys Error]</b> "+o),n&&n.apply(console,arguments)},console.warn=function(){var o=Array.from(arguments).join(" ");window.logToScreen("<b style='color:blue'>[Sys Warn]</b> "+o),e&&e.apply(console,arguments)},console.log=function(){var o=Array.from(arguments).join(" ");window.logToScreen("[Log] "+o),r&&r.apply(console,arguments)}}(),window.safeNavigate=function(o){window.logToScreen("🚀 <b>准备跳转:</b> "+o),0===o.indexOf("http:")&&window.logToScreen("⚠️ <b>警告:</b> 检测到 HTTP 协议，Android 9+ 可能直接拦截!");var n=Date.now();try{window.location.href=o}catch(o){window.logToScreen("❌ 直接报错: "+o.message)}setTimeout(function(){var o=Date.now()-n;window.logToScreen("❌ <b>跳转疑似失败!</b> (已过去 "+o+"ms)"),window.logToScreen("----------------------------------"),window.logToScreen("<b>可能原因排查:</b>"),window.logToScreen("1. 查看上方是否有 [Sys Error] "),window.logToScreen("2. DeepLink (App没装/Scheme未注册)"),window.logToScreen("3. Sandbox 阻止 (allow-top-navigation)"),window.logToScreen("4. Android 明文流量限制 (Cleartext)"),document.querySelector("div[style*='z-index: 2147483647']").style.backgroundColor="rgba(255,0,0,0.9)"},1500)},setTimeout(function(){"undefined"!=typeof mraid?window.logToScreen("✅ MRAID Detected. State: "+mraid.getState()):window.logToScreen("⚠️ MRAID Object Missing")},1e3)</script>
+
+<script>
+    var originalMraidOpen = mraid.open;
+    mraid.open = function(url) {
+        console.log("open ", url)
+        originalMraidOpen.call(this, url);
+    };
+
+const iframe = document.getElementById('adIframe');
+
+// 监听 iframe 发来的消息
+window.addEventListener('message', (event) => {
+    if(event.source === iframe.contentWindow) {
+    	console.log(originalMraidOpen)
+    	console.log(event.data)
+        const msg = event.data;
+        if(msg.type === 'mraid_call') {
+            const method = msg.method; // 'open'
+            const args = msg.args;     // ['https://example.com']
+            
+            if(typeof window.mraid !== 'undefined' && typeof window.mraid[method] === 'function') {
+            	console.log(window.mraid[method])            	
+                window.mraid[method](...args);
+            } else {
+                console.log(`父页面 mraid 不存在或没有 ${method} 方法`);
+            }
+        }
+    }
+});
+</script>
+</body>
+</html>
